@@ -1,0 +1,464 @@
+import pandas as pd 
+pd.options.display.float_format = "{:.1f}".format 
+pd.set_option('display.max_columns', None)
+
+# Load datasets
+personal = pd.read_stata("s01.dta")
+housing = pd.read_stata("s02.dta")
+education = pd.read_stata("s07.dta", convert_categoricals=False)
+employment = pd.read_stata("s09.dta", convert_categoricals=False)
+farming = pd.read_stata("s11a1.dta", convert_categoricals=False)
+business = pd.read_stata("s12a.dta")
+assets = pd.read_stata("s13.dta")
+absentees = pd.read_stata("s14a.dta", convert_categoricals=False)
+remittance1 = pd.read_stata("s15a.dta")
+remittance2 = pd.read_stata("s15b.dta")
+weight = pd.read_stata("weight.dta")
+poverty = pd.read_stata("poverty.dta")
+
+# DATA PREPARATION & AGGREGATION
+personal_unique = personal.drop_duplicates(subset=["psu_number", "hh_number", "idcode"])
+absentees_summary =absentees.groupby(["psu_number", "hh_number"]).agg({"q14_11": "first",  "q14_15": "first", "q14_18": "sum","q14_20": "sum", "q14_21": "sum"}).reset_index()
+
+#assets
+housing_summary = housing.groupby(["psu_number", "hh_number"])[["q02_12"]].first().reset_index()
+farming_summary = farming.groupby(["psu_number", "hh_number"])[["q11_12"]].first().reset_index()
+business_summary = business.groupby(["psu_number", "hh_number"])[["q12_29"]].first().reset_index()
+assets_summary = assets.groupby(["psu_number", "hh_number"])[["q13_29", "q13_35"]].first().reset_index()
+
+#foreign remittance
+remit_summary1 = remittance1.groupby(["psu_number", "hh_number"]).agg({ "q15_07": "first",  "q15_09": "sum"}).reset_index()
+remit_summary2 = remittance2.groupby(["psu_number", "hh_number"]).agg({"q15_17": "first", "q15_19": "sum"}).reset_index()
+
+mergedfinal = personal_unique.copy()
+merged = pd.merge(personal_unique, employment, on=["psu_number", "hh_number", "idcode"], how="left")
+mergedfinal = pd.merge(merged, education[["psu_number", "hh_number", "idcode", "q07_04", "q07_06"]], on=["psu_number", "hh_number", "idcode"], how="left")
+mergedfinal = pd.merge(mergedfinal, weight[["psu_number", "hh_number", "hhs_wt", "ind_wt"]].drop_duplicates(), on=["psu_number", "hh_number"], how="left")
+mergedfinal = pd.merge(mergedfinal, poverty[["psu_number", "hh_number", "ad_4", "domain", "prov", "poor", "pcep", "quintile_pcep"]], on=["psu_number", "hh_number"], how="left")
+mergedfinal = pd.merge(mergedfinal, absentees_summary, on=["psu_number", "hh_number"], how="left")
+mergedfinal = pd.merge(mergedfinal, housing_summary[["psu_number", "hh_number", "q02_12"]], on=["psu_number", "hh_number"], how="left")
+mergedfinal = pd.merge(mergedfinal, remit_summary1, on=["psu_number", "hh_number"], how="left")
+mergedfinal = pd.merge(mergedfinal, remit_summary2, on=["psu_number", "hh_number"], how="left")
+mergedfinal = pd.merge(mergedfinal, business_summary, on=["psu_number", "hh_number"], how="left")
+mergedfinal = pd.merge(mergedfinal, farming_summary, on=["psu_number", "hh_number"], how="left")
+mergedfinal = pd.merge(mergedfinal, assets_summary, on=["psu_number", "hh_number"], how="left")
+print(f"Final shape: {mergedfinal.shape}")
+
+working_age = mergedfinal[mergedfinal["q01_02"] == "Female"].copy()
+working_age = working_age[working_age["q07_04"].notna()].copy()
+working_age = working_age.drop_duplicates(subset=["psu_number", "hh_number", "idcode"])
+
+# AGE BINS
+bins = [15,21,26,31,36,41,46,51,56,61,120]
+labels = ["15-20", "21-25", "26-30", "31-35", "36-40", "41-45", "46-50", "51-55", "56-60", "Above 60"]
+working_age["age_bins"] = pd.cut(working_age["q01_03"], bins=bins, labels=labels)
+
+# age and school attendance
+working_age["age_group"] = pd.cut(
+   working_age["q01_03"],
+   bins=[14, 24, 45, 64, 120],
+   labels=["15-24", "25-45", "46-64" , "65-120"])
+school_map = {1: "Never attended", 2: "Previously attended", 3: "In school"}
+working_age["school_status"] = working_age["q07_04"].map(school_map)
+age_edu_pct = pd.crosstab(working_age["age_group"], working_age["school_status"], values=working_age["ind_wt"], aggfunc='sum', normalize="index") * 100
+
+# foreign remittance
+remit_cols_to_fix = ["q14_11", "q15_07", "q15_17", "q14_18", "q14_20", "q14_21", "q15_09", "q15_19"]
+for col in remit_cols_to_fix:
+    if col in working_age.columns:
+        working_age[col] = pd.to_numeric(working_age[col], errors='coerce').fillna(0)
+
+working_age["foreign_total"] = 0
+
+foreign_mask1 = working_age["q14_11"].between(800, 820)
+foreign_mask2 = working_age["q15_07"].between(800, 820)
+foreign_mask3 = working_age["q15_17"].between(800, 820)
+
+working_age.loc[foreign_mask1, "foreign_total"] += working_age["q14_18"] + working_age["q14_20"]
+working_age.loc[foreign_mask2, "foreign_total"] += working_age["q15_09"]
+working_age.loc[foreign_mask3, "foreign_total"] += working_age["q15_19"]
+
+hh_foreign = working_age[["psu_number", "hh_number", "foreign_total", "hhs_wt"]]
+hh_foreign = hh_foreign.drop_duplicates(subset=["psu_number", "hh_number"]).copy()
+hh_foreign = hh_foreign.sort_values("foreign_total").reset_index(drop=True)
+hh_foreign["cum_wt"] = hh_foreign["hhs_wt"].cumsum()
+hh_foreign["cum_share"] = hh_foreign["cum_wt"] / hh_foreign["hhs_wt"].sum()
+hh_foreign["foreign_quintile"] = pd.cut( hh_foreign["cum_share"],bins=[-0.001, 0.2, 0.4, 0.6, 0.8, 1], labels=[1, 2, 3, 4, 5])
+
+working_age = pd.merge(working_age, hh_foreign[["psu_number", "hh_number", "foreign_quintile"]], on=["psu_number", "hh_number"], how="left")
+
+#nepal remittance
+working_age["nepal_total"] = 0
+
+nepal_mask1 = working_age["q14_11"].between(100, 710)
+nepal_mask2 = working_age["q15_07"].between(100, 710)
+nepal_mask3 = working_age["q15_17"].between(100, 710)
+
+working_age.loc[nepal_mask1, "nepal_total"] += working_age["q14_18"] + working_age["q14_20"]
+working_age.loc[nepal_mask2, "nepal_total"] += working_age["q15_09"]
+working_age.loc[nepal_mask3, "nepal_total"] += working_age["q15_19"]
+
+hh_nepal = working_age[["psu_number", "hh_number", "nepal_total", "hhs_wt"]]
+hh_nepal = hh_nepal.drop_duplicates(subset=["psu_number", "hh_number"]).copy()
+hh_nepal = hh_nepal.sort_values("nepal_total").reset_index(drop=True)
+hh_nepal["cum_wt"] = hh_nepal["hhs_wt"].cumsum()
+hh_nepal["cum_share"] = hh_nepal["cum_wt"] / hh_nepal["hhs_wt"].sum()
+hh_nepal["nepal_quintile"] = pd.cut( hh_nepal["cum_share"], bins=[-0.001, 0.2, 0.4, 0.6, 0.8, 1],labels=[1, 2, 3, 4, 5])
+
+working_age = pd.merge(working_age, hh_nepal[["psu_number", "hh_number", "nepal_quintile"]], on=["psu_number", "hh_number"], how="left")
+
+# PCEP above or below mean
+working_age["pcep_quintile"] = working_age["quintile_pcep"]
+meanpcep = ((working_age["pcep"] * working_age["ind_wt"]).sum()/ working_age["ind_wt"].sum())
+working_age["pcep_vs_mean"] = (working_age["pcep"].gt(meanpcep)).map({True: "Above Mean", False: "Below Mean"})
+
+# ASSETS
+cols_to_sum = ["q02_12", "q11_12", "q12_29", "q13_29", "q13_35"]
+for col in cols_to_sum:
+    if col in working_age.columns:
+        working_age[col] = pd.to_numeric(working_age[col], errors="coerce").fillna(0)
+    else:
+        working_age[col] = 0
+
+working_age["total_assets"] = working_age[cols_to_sum].sum(axis=1)
+hh_assets = working_age[["psu_number", "hh_number", "total_assets", "hhs_wt"]].copy()
+hh_assets = hh_assets.drop_duplicates(subset=["psu_number", "hh_number"])
+hh_assets = hh_assets[hh_assets["total_assets"] > 0].copy()
+hh_assets = hh_assets.sort_values("total_assets")
+
+# Compute cumulative weighted share using household weights
+hh_assets["cum_wt"] = hh_assets["hhs_wt"].cumsum()
+hh_assets["cum_share"] = hh_assets["cum_wt"] / hh_assets["hhs_wt"].sum()
+hh_assets["asset_quintile"] = pd.cut(hh_assets["cum_share"], bins=[0, 0.2, 0.4, 0.6, 0.8, 1], labels=[1,2,3,4,5])
+working_age = pd.merge(working_age, hh_assets[["psu_number", "hh_number", "asset_quintile"]], on=["psu_number", "hh_number"], how="left")
+
+# EDUCATION
+# Education level 
+def edu_level_completed(row):
+   level = row.get("q07_06")
+   if pd.isna(level):
+       return "Missing"
+   level = int(level)
+   if 0 <= level <= 8:
+       return "Basic (0–8)"
+   elif 9 <= level <= 12:
+       return "High School (9–12)"
+   elif level == 13:
+       return "Bachelor"
+   elif level == 14:
+       return "Master"
+   elif level == 15:
+       return "Professional Degree"
+   elif level == 16:
+       return "Literate (Levelless)"
+   elif level == 17:
+       return "Illiterate"
+   else:
+       return "Other/Unknown"
+working_age["edu_level_cat"] = working_age.apply(edu_level_completed, axis=1)
+print("\n[Check: Education Counts]")
+print(working_age["edu_level_cat"].value_counts())
+
+working_age["school_status"] = working_age["q07_04"].map({
+    1: "Never attended",
+    2: "Previously attended",
+    3: "Currently attending"
+})
+
+# CHILDREN
+# Identify children aged 0–3 in personal dataset
+personal["child_0_3"] = personal["q01_03"].between(0, 3)
+hh_child03 = (personal.groupby(["psu_number", "hh_number"])["child_0_3"].any().reset_index())
+hh_child03 = hh_child03.rename(columns={"child_0_3": "hh_has_child_0_3"})
+
+working_age = pd.merge(working_age, hh_child03, on=["psu_number", "hh_number"], how="left")
+working_age["hh_has_child_0_3"] = working_age["hh_has_child_0_3"].fillna(False)
+
+#children under 18
+personal["child_under18"] = personal["q01_03"] < 18
+hh_child18 = (personal.groupby(["psu_number", "hh_number"])["child_under18"].sum().reset_index().rename(columns={"child_under18": "hh_children_count"}))
+working_age = pd.merge(working_age, hh_child18, on=["psu_number", "hh_number"], how="left")
+working_age["hh_children_count"] = working_age["hh_children_count"].fillna(0)
+
+personal["is_child_of_head"] = (personal["q01_04"] == "SON/DAUGHTER") & (personal["q01_03"] < 18)
+hh_head_child = (personal.groupby(["psu_number", "hh_number"])["is_child_of_head"].any().reset_index().rename(columns={"is_child_of_head": "head_has_minor_child"}))
+working_age = pd.merge(working_age, hh_head_child, on=["psu_number", "hh_number"], how="left")
+working_age["head_has_minor_child"] = working_age["head_has_minor_child"].fillna(False)
+working_age["has_kid_u18"] = working_age["hh_children_count"] > 0
+
+# Approach 1: Original
+def approach1(row):
+    if (row["q01_05"] != "Never married" and row["q01_04"] in ["HEAD", "HUSBAND/WIFE"] and row.get("hh_children_count", 0) > 0):
+        return True
+    return False
+
+# Approach 2: remove HEAD and the person should be husband/wife to the head
+def approach2(row):
+    if (row["q01_05"] != "Never married" and row["q01_04"] == "HUSBAND/WIFE" and row.get("hh_children_count", 0) > 0):
+        return True
+    return False
+
+# Approach 3: remove HEAD AND the household head should have a son or daughter under 18
+def approach3(row):
+    if (row["q01_05"] != "Never married" and row["q01_04"] == "HUSBAND/WIFE" and row.get("head_has_minor_child", False)):
+        return True
+    return False
+
+working_age["child_app1"] = working_age.apply(approach1, axis=1)
+working_age["child_app2"] = working_age.apply(approach2, axis=1)
+working_age["child_app3"] = working_age.apply(approach3, axis=1)
+def weighted_pct(df, col):
+    return df.loc[df[col], "ind_wt"].sum() / df["ind_wt"].sum() * 100
+
+percentage1 = weighted_pct(working_age, "child_app1")
+percentage2 = weighted_pct(working_age, "child_app2")
+percentage3 = weighted_pct(working_age, "child_app3")
+
+#------------------------------------------------------------------------------
+
+def get_detailed_status(row):
+    q2, q3, q4, q5 = [pd.to_numeric(row.get(f"q09_0{i}"), errors='coerce') for i in range(2, 6)]
+    q18, q19, q22 = [pd.to_numeric(row.get(f"q09_{i}"), errors='coerce') for i in [18, 19, 22]]
+    edu = row.get("q07_04")
+
+    if q2 == 1 or q3 == 1 or q4 == 1 or q5 == 1:
+        return "Employed"
+    is_unemployed = (q22 in [1, 2]) and (q18 == 1 or q19 == 1)  
+    if is_unemployed:
+        return "Unemployed and in education" if edu == 3 else "Unemployed and not in education"
+    return "Not in Labor force and in education" if edu == 3 else "Not in Labor force and not in education"
+
+# Apply the function
+working_age["labor_status_compare"] = working_age.apply(get_detailed_status, axis=1)
+total = working_age["ind_wt"].sum()
+
+employed_pct = working_age.loc[working_age["labor_status_compare"] == "Employed", "ind_wt"].sum() / total * 100
+unemployed_pct = working_age.loc[working_age["labor_status_compare"].isin(["Unemployed and in education", "Unemployed and not in education"]), "ind_wt"].sum() / total * 100
+print(f"Employed: {employed_pct:.1f}%")
+print(f"Unemployed: {unemployed_pct:.1f}%")
+
+# identify NEET (not in education, employment, and training)
+working_age["neet_status"] = (working_age["labor_status_compare"] != "Employed") & (working_age["q07_04"] != 3)
+def neet_rate(df):
+    total_w = df["ind_wt"].sum()
+    neet_w = df.loc[df["neet_status"] == True, "ind_wt"].sum()
+    return (neet_w / total_w) * 100 if total_w > 0 else 0
+
+print(f"Employed: {(working_age[working_age['labor_status_compare'] == 'Employed']['ind_wt'].sum() / working_age['ind_wt'].sum() * 100):.1f}%")
+print(f"NEET Rate: {neet_rate(working_age):.1f}%")
+
+# DEFINE FUNCTIONS
+def print_row_comparison(df, column, title):
+    comparison = pd.crosstab(
+        index=df[column],
+        columns=df["labor_status_compare"],
+        values=df["ind_wt"],
+        aggfunc='sum',
+        normalize='index') * 100
+    order = ["Employed", "Unemployed and in education", "Unemployed and not in education", "Not in Labor force and in education", "Not in Labor force and not in education"]
+    comparison = comparison.reindex(columns=order)
+    print(f"\n[{title}]")
+    print(comparison.round(1))
+
+# Printing
+print("COMPARISON TABLE")
+print_row_comparison(working_age, "q01_05", "Marital Status")
+print_row_comparison(working_age, "age_bins", "Age Group Comparison")
+print_row_comparison(working_age, "ad_4", "Rural/Urban Split")
+print_row_comparison(working_age, "domain", "Analytical Domain")
+print_row_comparison(working_age, "prov", "Province Comparison")
+print_row_comparison(working_age, "poor", "Poverty Status (0=Non-poor, 1=Poor)")
+print_row_comparison(working_age, "pcep_vs_mean", "Consumption vs Mean")
+print_row_comparison(working_age, "pcep_quintile", "Consumption Quintiles")
+print_row_comparison(working_age, "asset_quintile", "Asset Quintiles")
+print_row_comparison(working_age, "foreign_quintile", "Foreign Remittance Quintile")
+print_row_comparison(working_age, "nepal_quintile", "Nepal Remittance Quintile")
+print_row_comparison(working_age, "q07_04", "School Attendance")
+print_row_comparison(working_age, "edu_level_cat", "Education Level")
+print("\n[Education and Age]")
+print(age_edu_pct.round(1))
+print_row_comparison(working_age, "hh_has_child_0_3", "Presence of Kids 0-3")
+print_row_comparison(working_age, "child_app1", "Approach 1 Flag")
+print_row_comparison(working_age, "child_app2", "Approach 2 Flag")
+print_row_comparison(working_age, "child_app3", "Approach 3 Flag")
+
+# AVERAGES & SPECIALS
+print("\n" + "="*50)
+print("SUMMARY STATS")
+def weighted_avg_children(df, flag_col):
+    return ((df[flag_col].astype(int) * df["hh_children_count"]) * df["ind_wt"]).sum() / df["ind_wt"].sum()
+
+summary_avg_corrected = working_age.groupby("labor_status_compare").apply(lambda x: pd.Series({"Avg Age": (x["q01_03"] * x["ind_wt"]).sum() / x["ind_wt"].sum()}))
+print(summary_avg_corrected.round(1))
+
+#not in labor force comparsio
+def get_nlf_detailed(row):
+    base = row.get("labor_status_compare", "")
+    if "Not in Labor force" not in base:
+        return None
+    if base == "Not in Labor force and in education":
+        return "NLF - In education"
+    q01_01 = pd.to_numeric(row.get("q09_01"), errors='coerce')
+    q11_31 = pd.to_numeric(row.get("q11_31"), errors='coerce')
+    q11_13 = pd.to_numeric(row.get("q11_13"), errors='coerce')
+    if q01_01 == 1 or q11_31 == 1 or q11_13 == 1:
+        return "NLF - Unpaid/Subsistence"
+    return "NLF - Truly inactive"
+    
+working_age["nlf_detailed"] = working_age.apply(get_nlf_detailed, axis=1)
+
+def print_nlf_comparison(df, column, title):
+    comparison = pd.crosstab(
+        index=df[column],
+        columns=df["nlf_detailed"],
+        values=df["ind_wt"],
+        aggfunc='sum',
+        normalize='index') * 100
+    order = ["NLF - In education", "NLF - Unpaid/Subsistence", "NLF - Truly inactive"]
+    comparison = comparison.reindex(columns=order, fill_value=0)
+    print(f"\n[{title}]")
+    print(comparison.round(1))
+
+# Apply the print for a few key splits
+print("\n" + "="*50)
+print_nlf_comparison(working_age, "q01_05", "Marital Status")
+print_nlf_comparison(working_age, "q01_02", "Gender")
+print_nlf_comparison(working_age, "age_bins", "Age Group")
+print_nlf_comparison(working_age, "ad_4", "Rural/Urban Split")
+print_nlf_comparison(working_age, "domain", "Analytical Domain")
+print_nlf_comparison(working_age, "prov", "Province Comparison")
+print_nlf_comparison(working_age, "poor", "Poverty Status (0=Non-poor, 1=Poor)")
+print_nlf_comparison(working_age, "pcep_vs_mean", "Consumption vs Mean")
+print_nlf_comparison(working_age, "pcep_quintile", "Consumption Quintiles")
+print_nlf_comparison(working_age, "asset_quintile", "Asset Quintiles")
+print_nlf_comparison(working_age, "foreign_quintile", "Foreign Remittance Quintile")
+print_nlf_comparison(working_age, "nepal_quintile", "Nepal Remittance Quintile")
+print_nlf_comparison(working_age, "q07_04", "School Attendance")
+print_nlf_comparison(working_age, "edu_level_cat", "Education Level")
+print("\n[Education and Age]")
+print(age_edu_pct.round(1))
+print_nlf_comparison(working_age, "hh_has_child_0_3", "Presence of Kids 0-3")
+print_nlf_comparison(working_age, "child_app1", "Approach 1 Flag")
+print_nlf_comparison(working_age, "child_app2", "Approach 2 Flag")
+print_nlf_comparison(working_age, "child_app3", "Approach 3 Flag")
+
+# AVERAGES & SPECIALS
+print("\n" + "="*50)
+print("SUMMARY STATS")
+
+summary_avg_corrected = working_age.groupby("nlf_detailed").apply(lambda x: pd.Series({"Avg Age": (x["q01_03"] * x["ind_wt"]).sum() / x["ind_wt"].sum()}))
+print(summary_avg_corrected.round(1))
+
+# charts
+import os
+import re
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# style
+sns.set(style="whitegrid")
+plt.rcParams.update({'figure.figsize': (8,5)})
+
+# make plots folder
+os.makedirs("femalelaborforce", exist_ok=True)
+
+# sanitize file name
+def safe_filename(s):
+    return re.sub(r"[^\w\d\-]", "_", s)
+
+# define columns + friendly titles
+comparison_columns = [
+    ("q01_05", "Marital Status"),
+    ("age_bins", "Age Group Comparison"),
+    ("ad_4", "Rural/Urban Split"),
+    ("domain", "Analytical Domain"),
+    ("prov", "Province Comparison"),
+    ("poor", "Poverty Status"),
+    ("pcep_vs_mean", "Consumption vs Mean"),
+    ("pcep_quintile", "Consumption Quintiles"),
+    ("asset_quintile", "Asset Quintiles"),
+    ("foreign_quintile", "Foreign Remittance Quintile"),
+    ("nepal_quintile", "Nepal Remittance Quintile"),
+    ("school_status", "School Attendance"),
+    ("edu_level_cat", "Education Level"),
+    ("hh_has_child_0_3", "Presence of Kids 0-3"),
+    ("child_app1", "Approach 1 (Head + Spouse, HH has kids)"),
+    ("child_app2", "Approach 2 (Spouse only)"),
+    ("child_app3", "Approach 3 (Spouse + kids <18 strict)")]
+
+fig, ax = plt.subplots(figsize=(8,5))
+age_edu_pct.plot(kind="bar", stacked=True, ax=ax)
+
+ax.set_title("Education Status by Age Group (%)")
+ax.set_ylim(0,100)
+
+plt.xticks(rotation=30)
+plt.tight_layout()
+plt.savefig("neet/education_age.png")
+plt.close()
+
+
+# define order of labor statuses
+labor_order = ["Employed", "Unemployed and in education", "Unemployed and not in education", "Not in Labor force and in education", "Not in Labor force and not in education"]
+nlf_order = ["NLF - In education", "NLF - Unpaid/Subsistence", "NLF - Truly inactive"]
+
+
+for col, title in comparison_columns:
+    if col not in working_age.columns:
+        continue
+
+    #NLF charts
+    nlf_only = working_age[working_age["nlf_detailed"].notna()]
+    if not nlf_only.empty:
+        cross_nlf = pd.crosstab(nlf_only[col], nlf_only["nlf_detailed"], 
+                                values=nlf_only["ind_wt"], aggfunc='sum').fillna(0)
+
+        # Reindex rows and columns to ensure missing categories show up
+        cross_nlf = cross_nlf.reindex(index=nlf_only[col].unique(), columns=nlf_order, fill_value=0)
+        cross_nlf_pct = cross_nlf.div(cross_nlf.sum(axis=1).replace(0,1), axis=0) * 100
+
+        fig2, ax2 = plt.subplots(figsize=(8,5))
+        cross_nlf_pct.plot(kind="bar", stacked=True, colormap="Pastel1", ax=ax2)
+
+        for container in ax2.containers:
+            for bar in container:
+                height = bar.get_height()
+                if height > 3:
+                    ax2.text(bar.get_x() + bar.get_width()/2, bar.get_y() + height/2,
+                             f"{height:.0f}%", ha='center', va='center', fontsize=8)
+
+        ax2.set_title(f"NLF Detail: {title} (%)")
+        ax2.set_ylabel("Percentage (%)")
+        ax2.set_ylim(0, 100)
+        plt.xticks(rotation=30, ha='right')
+        ax2.legend(title="NLF Status", bbox_to_anchor=(1.02, 1), loc="upper left")
+        plt.tight_layout()
+        fig2.savefig(f"femalelaborforce/NLF_{safe_filename(title)}.png")
+        plt.close(fig2)
+
+    # --- Labor status charts ---
+    cross = pd.crosstab(working_age[col], working_age["labor_status_compare"], 
+                        values=working_age["ind_wt"], aggfunc='sum').fillna(0)
+
+    # Reindex before normalization to match table exactly
+    cross = cross.reindex(index=working_age[col].unique(), columns=labor_order, fill_value=0)
+    cross_pct = cross.div(cross.sum(axis=1).replace(0,1), axis=0) * 100
+
+    fig, ax = plt.subplots(figsize=(8,5))
+    cross_pct.plot(kind="bar", stacked=True, colormap="Set3", ax=ax)
+
+    for container in ax.containers:
+        for bar in container:
+            height = bar.get_height()
+            if height > 3:
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_y() + height/2,
+                        f"{height:.0f}%", ha='center', va='center', fontsize=8)
+
+    ax.set_title(f"Labor Status: {title} (%)")
+    ax.set_ylabel("Percentage (%)")
+    ax.set_ylim(0, 100)
+    plt.xticks(rotation=30, ha='right')
+    ax.legend(title="Labor Status", bbox_to_anchor=(1.02, 1), loc="upper left")
+    plt.tight_layout()
+    fig.savefig(f"femalelaborforce/Labor_{safe_filename(title)}.png")
+    plt.close(fig)
