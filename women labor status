@@ -44,7 +44,7 @@ mergedfinal = pd.merge(mergedfinal, farming_summary, on=["psu_number", "hh_numbe
 mergedfinal = pd.merge(mergedfinal, assets_summary, on=["psu_number", "hh_number"], how="left")
 print(f"Final shape: {mergedfinal.shape}")
 
-working_age = mergedfinal[mergedfinal["q01_02"] == "Female"].copy()
+working_age = mergedfinal[(mergedfinal["q01_03"] >= 15) & (mergedfinal["q01_02"] == "Female")].copy()
 working_age = working_age[working_age["q07_04"].notna()].copy()
 working_age = working_age.drop_duplicates(subset=["psu_number", "hh_number", "idcode"])
 
